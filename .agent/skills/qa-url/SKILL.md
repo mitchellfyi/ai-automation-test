@@ -61,7 +61,7 @@ navigate to the target website and perform a comprehensive audit.
 
 1. Read the `TARGET_URL` from the Config section above.
 2. Start at the target URL and explore the main pages (homepage, about,
-   pricing, docs, blog, etc.) — aim for at least 5 pages if they exist.
+   pricing, docs, blog, etc.) — aim for at least 5 pages if they exist, but ideally test all accessible pages.
 3. For each issue found, record:
    - **Page URL** where the issue was observed
    - **Description** of the problem
