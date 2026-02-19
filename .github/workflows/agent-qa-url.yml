@@ -154,7 +154,11 @@ jobs:
           PROMPTEOF
           fi
 
-      # ── 8. Run Claude Code CLI in headless mode ─────────────────────────
+      # ── 8. Install Claude Code CLI ────────────────────────────────────
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # ── 9. Run Claude Code CLI in headless mode ─────────────────────────
       - name: Run Claude Code QA agent
         run: |
           claude -p "$(cat /tmp/qa_prompt.txt)" \
