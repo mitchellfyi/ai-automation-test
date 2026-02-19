@@ -1,0 +1,169 @@
+# ============================================================================
+# Website QA Agent — Claude Code + Puppeteer MCP
+# ============================================================================
+# Runs Claude Code with a headless browser to audit any website for issues.
+# The audit prompt and target URL live in .agent/skills/agent-qa-url/SKILL.md
+#
+# SETUP:
+#   1. Copy this file to:        .github/workflows/agent-qa-url.yml
+#   2. Customise the skill at:   .agent/skills/agent-qa-url/SKILL.md
+#   3. Add a repository secret:  ANTHROPIC_API_KEY
+#   4. Install the Claude App:   https://github.com/apps/claude
+#
+# TRIGGERS:
+#   - Manual dispatch (with optional URL/prompt overrides)
+#   - Daily at 05:00 UTC
+#   - After a successful push to main (post-deploy)
+# ============================================================================
+
+name: Agent QA URL
+
+on:
+  # ── Manual trigger with optional overrides ──────────────────────────────
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Override target URL (leave blank to use SKILL.md)"
+        required: false
+        type: string
+      prompt:
+        description: "Override prompt (leave blank to use SKILL.md)"
+        required: false
+        type: string
+      max_turns:
+        description: "Max agent turns (controls cost/depth)"
+        required: false
+        type: number
+        default: 200
+
+  # ── Daily schedule ──────────────────────────────────────────────────────
+  schedule:
+    - cron: "0 5 * * *" # Every day at 05:00 UTC
+
+  # ── After successful push to main (post-deploy) ────────────────────────
+  push:
+    branches: [main]
+
+# Prevent concurrent runs — if a new push lands while QA is running,
+# cancel the in-progress run and start fresh.
+concurrency:
+  group: agent-qa-url
+  cancel-in-progress: true
+
+env:
+  SKILL_PATH: .agent/skills/agent-qa-url/SKILL.md
+  DEFAULT_MAX_TURNS: "200"
+
+jobs:
+  agent-qa-url:
+    name: Audit website with Claude
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      # ── 1. Checkout repo ────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Node.js ───────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ── 3. Install Puppeteer MCP server ─────────────────────────────────
+      - name: Install Puppeteer MCP server
+        run: npm install -g @modelcontextprotocol/server-puppeteer
+
+      # ── 4. Configure MCP for Claude Code ────────────────────────────────
+      - name: Configure MCP settings
+        run: |
+          mkdir -p ~/.claude
+          cat > ~/.claude/settings.json << 'EOF'
+          {
+            "mcpServers": {
+              "puppeteer": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+                "env": {
+                  "PUPPETEER_LAUNCH_OPTIONS": "{\"headless\": true, \"args\": [\"--no-sandbox\", \"--disable-setuid-sandbox\", \"--disable-dev-shm-usage\", \"--disable-gpu\"]}"
+                }
+              }
+            }
+          }
+          EOF
+
+      # ── 5. Ensure agent-qa-url label exists ─────────────────────────────────
+      - name: Create agent-qa-url label if missing
+        run: gh label create agent-qa-url --color "D93F0B" --description "Agent QA URL" --force
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 6. Resolve configuration ────────────────────────────────────────
+      - name: Resolve target URL and prompt
+        id: config
+        run: |
+          # ── Read the skill file ──
+          SKILL_CONTENT=$(cat "${{ env.SKILL_PATH }}")
+
+          # ── Extract TARGET_URL from skill ──
+          SKILL_URL=$(echo "$SKILL_CONTENT" | grep -oP '^TARGET_URL:\s*\K\S+' || echo "")
+
+          # ── Resolve URL: dispatch input → skill file ──
+          if [ -n "${{ inputs.target_url }}" ]; then
+            TARGET_URL="${{ inputs.target_url }}"
+          elif [ -n "$SKILL_URL" ]; then
+            TARGET_URL="$SKILL_URL"
+          else
+            echo "::error::No target URL found. Set it in ${{ env.SKILL_PATH }} or pass as dispatch input."
+            exit 1
+          fi
+          echo "target_url=$TARGET_URL" >> "$GITHUB_OUTPUT"
+
+          # ── Resolve max turns ──
+          if [ -n "${{ inputs.max_turns }}" ] && [ "${{ inputs.max_turns }}" != "200" ]; then
+            echo "max_turns=${{ inputs.max_turns }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "max_turns=${{ env.DEFAULT_MAX_TURNS }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build prompt
+        id: prompt
+        run: |
+          if [ -n "${{ inputs.prompt }}" ]; then
+            # Use the manual override prompt
+            cat << 'EOF' > /tmp/agent_qa_url_prompt.txt
+          ${{ inputs.prompt }}
+          EOF
+          else
+            # Build prompt from the skill file
+            cat << EOF > /tmp/agent_qa_url_prompt.txt
+          Read the QA skill file at ${{ env.SKILL_PATH }} in this repository.
+          Follow every instruction in that file to perform a website audit.
+
+          The target URL to audit is: ${{ steps.config.outputs.target_url }}
+
+          Use the Puppeteer browser tools to navigate the site. When you have
+          finished the audit, use the gh CLI to create a GitHub issue in this
+          repository with the label "agent-qa-url". Include today's date and 
+          current time in the issue title.
+          EOF
+          fi
+
+      # ── 7. Run Claude Code ──────────────────────────────────────────────
+      - name: Run Claude Code QA agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            $(cat /tmp/agent_qa_url_prompt.txt)
+          claude_args: >-
+            --max-turns ${{ steps.config.outputs.max_turns }}
+            --allowedTools "Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),mcp__puppeteer__*"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUPPETEER_LAUNCH_OPTIONS: '{"headless": true, "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]}'
