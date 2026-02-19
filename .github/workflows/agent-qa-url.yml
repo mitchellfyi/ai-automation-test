@@ -9,6 +9,7 @@
 #   2. Customise the skill at:   .agent/skills/qa-url/SKILL.md
 #   3. Add a repository secret:  ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
 #   4. Install the Claude App:   https://github.com/apps/claude
+#   5. (Optional) Add secrets:   QA_USERNAME, QA_PASSWORD for authenticated testing
 #
 # TRIGGERS:
 #   - Manual dispatch (with optional URL/prompt overrides)
@@ -58,7 +59,7 @@ jobs:
   agent-qa-url:
     name: "Agent: QA URL"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     permissions:
       contents: read
@@ -97,7 +98,7 @@ jobs:
           }
           EOF
 
-      # ── 5. Ensure agent-qa-url label exists ─────────────────────────────────
+      # ── 5. Ensure agent-qa-url label exists ─────────────────────────────
       - name: Create agent-qa-url label if missing
         run: gh label create agent-qa-url --color "D93F0B" --description "Agent QA URL" --force
         env:
@@ -146,13 +147,29 @@ jobs:
           - Repository: ${{ github.repository }}
           - Trigger: ${{ github.event_name }}
           - Date: $(date -u +"%Y-%m-%d")
+          PROMPTEOF
+
+            # Conditionally add login credentials
+            if [ -n "$QA_USERNAME" ]; then
+              cat >> /tmp/qa_prompt.txt << CREDSEOF
+
+          LOGIN CREDENTIALS (use these to test authenticated areas):
+          - Username: $QA_USERNAME
+          - Password: $QA_PASSWORD
+          CREDSEOF
+            fi
+
+            cat >> /tmp/qa_prompt.txt << INSTREOF
 
           Use the Puppeteer browser tools (mcp__puppeteer__*) to navigate the site.
-          When finished, use the gh CLI to create a GitHub issue in the repository
-          "${{ github.repository }}" with the label "agent-qa-url".
-          Include today's date in the issue title, e.g. "Website QA Audit — $(date -u +"%Y-%m-%d")".
-          PROMPTEOF
+          Write all findings incrementally to /tmp/qa_url_manifest.md as described in the skill instructions.
+          The repository is "${{ github.repository }}" and today's date is $(date -u +"%Y-%m-%d").
+          Do NOT create a GitHub issue — a separate reporter agent will handle that.
+          INSTREOF
           fi
+        env:
+          QA_USERNAME: ${{ secrets.QA_USERNAME }}
+          QA_PASSWORD: ${{ secrets.QA_PASSWORD }}
 
       # ── 8. Install Claude Code CLI ────────────────────────────────────
       - name: Install Claude Code CLI
@@ -180,6 +197,19 @@ jobs:
           fi
           echo "::endgroup::"
 
+          echo "::group::Credentials check"
+          if [ -n "$QA_USERNAME" ]; then
+            echo "QA_USERNAME is set ($QA_USERNAME)"
+          else
+            echo "QA_USERNAME is NOT set (unauthenticated testing only)"
+          fi
+          if [ -n "$QA_PASSWORD" ]; then
+            echo "QA_PASSWORD is set (${#QA_PASSWORD} chars)"
+          else
+            echo "QA_PASSWORD is NOT set"
+          fi
+          echo "::endgroup::"
+
           echo "::group::MCP settings"
           cat ~/.claude/settings.json
           echo "::endgroup::"
@@ -190,24 +220,27 @@ jobs:
           echo "Trigger:    ${{ github.event_name }}"
           echo "::endgroup::"
 
-          echo "::group::Prompt (first 50 lines)"
-          head -50 /tmp/qa_prompt.txt
+          echo "::group::Prompt (first 80 lines)"
+          head -80 /tmp/qa_prompt.txt
           echo "::endgroup::"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          QA_USERNAME: ${{ secrets.QA_USERNAME }}
+          QA_PASSWORD: ${{ secrets.QA_PASSWORD }}
 
       # ── 10. Run Claude Code CLI in headless mode ────────────────────────
       - name: Run Claude Code QA agent
         id: claude_run
+        continue-on-error: true
         run: |
           set -o pipefail
           echo "::group::Claude Code output"
           claude -p "$(cat /tmp/qa_prompt.txt)" \
             --max-turns "${{ steps.config.outputs.max_turns }}" \
-            --allowedTools "Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(date:*),mcp__puppeteer__*" \
+            --allowedTools "Bash(git:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(date:*),Bash(curl:*),mcp__puppeteer__*" \
             --verbose \
-            2>&1 | tee /tmp/claude_output.txt
+            2>&1 | tee /tmp/qa_url_output_agent.txt
           EXIT_CODE=${PIPESTATUS[0]}
           echo "::endgroup::"
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
@@ -215,19 +248,50 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUPPETEER_LAUNCH_OPTIONS: '{"headless": true, "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]}'
 
-      # ── 11. Upload Claude output as artifact on failure ─────────────────
-      - name: Upload Claude output on failure
-        if: failure()
+      # ── 11. Upload artifacts ──────────────────────────────────────────
+      - name: Upload Claude output and manifest
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-output
-          path: /tmp/claude_output.txt
-          retention-days: 7
+          name: qa-url-artifacts
+          path: |
+            /tmp/qa_url_output_agent.txt
+            /tmp/qa_url_manifest.md
+          retention-days: 14
 
-      # ── 12. Summary ────────────────────────────────────────────────────
+      # ── 12. Reporter agent — creates GitHub issue from manifest ──────
+      - name: Run reporter agent
+        if: always()
+        run: |
+          echo "::group::Reporter agent output"
+          claude -p "$(cat <<'REPORTEREOF'
+          Read the file /tmp/qa_url_manifest.md. Create a GitHub issue from its contents in the repository "${{ github.repository }}".
+
+          Title format: "Website QA Audit — <date from manifest front-matter>"
+
+          Body format:
+          - Start with a summary: target URL, date, number of pages audited, and number of findings
+          - If the manifest does NOT contain a "## Status: Complete" marker, add a prominent note at the top: "⚠️ **Partial Audit** — The QA agent was interrupted before completing the full audit. The findings below are incomplete."
+          - List all findings grouped by severity (Critical → High → Medium → Low), preserving the details from the manifest
+          - Add a "Pages Audited" section listing all audited pages
+          - If the manifest file is empty or missing, create an issue noting that the QA agent produced no output
+
+          Use the label "agent-qa-url".
+          REPORTEREOF
+          )" \
+            --max-turns 10 \
+            --allowedTools "Bash(gh:*),Bash(cat:*),Bash(head:*),Bash(tail:*)" \
+            --verbose \
+            2>&1 | tee /tmp/qa_url_output_reporter.txt
+          echo "::endgroup::"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 13. Summary ────────────────────────────────────────────────────
       - name: Post job summary
         if: always()
         run: |
@@ -236,13 +300,34 @@ jobs:
           echo "- **Target URL:** ${{ steps.config.outputs.target_url }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Trigger:** \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Max turns:** ${{ steps.config.outputs.max_turns }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Claude exit code:** ${{ steps.claude_run.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **QA agent exit code:** ${{ steps.claude_run.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f /tmp/claude_output.txt ]; then
+
+          # Check audit completeness
+          if [ -f /tmp/qa_url_manifest.md ] && grep -q "## Status: Complete" /tmp/qa_url_manifest.md; then
+            echo "- **Audit status:** ✅ Complete" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f /tmp/qa_url_manifest.md ]; then
+            echo "- **Audit status:** ⚠️ Partial (agent was interrupted)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Audit status:** ❌ No manifest produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f /tmp/qa_url_manifest.md ]; then
+            echo "<details><summary>QA Manifest</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```markdown' >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/qa_url_manifest.md >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -f /tmp/qa_url_output_agent.txt ]; then
             echo "<details><summary>Claude output (last 100 lines)</summary>" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -100 /tmp/claude_output.txt >> "$GITHUB_STEP_SUMMARY"
+            tail -100 /tmp/qa_url_output_agent.txt >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             echo "</details>" >> "$GITHUB_STEP_SUMMARY"
           fi
