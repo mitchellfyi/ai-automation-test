@@ -2,11 +2,11 @@
 # Website QA Agent — Claude Code + Puppeteer MCP
 # ============================================================================
 # Runs Claude Code with a headless browser to audit any website for issues.
-# The audit prompt and target URL live in .agent/skills/qa-url/SKILL.md.md
+# The audit prompt and target URL live in .agent/skills/qa-url/SKILL.md
 #
 # SETUP:
 #   1. Copy this file to:        .github/workflows/agent-qa-url.yml
-#   2. Customise the skill at:   .agent/skills/qa-url/SKILL.md.md
+#   2. Customise the skill at:   .agent/skills/qa-url/SKILL.md
 #   3. Add a repository secret:  ANTHROPIC_API_KEY
 #   4. Install the Claude App:   https://github.com/apps/claude
 #
@@ -51,7 +51,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SKILL_PATH: .agent/skills/qa-url/SKILL.md.md
+  SKILL_PATH: .agent/skills/qa-url/SKILL.md
   DEFAULT_MAX_TURNS: "200"
 
 jobs:
