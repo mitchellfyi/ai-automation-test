@@ -56,7 +56,7 @@ env:
 
 jobs:
   agent-qa-url:
-    name: Audit website with Claude
+    name: Agent: QA URL
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -104,66 +104,64 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ── 6. Resolve configuration ────────────────────────────────────────
-      - name: Resolve target URL and prompt
+      - name: Resolve target URL
         id: config
         run: |
-          # ── Read the skill file ──
-          SKILL_CONTENT=$(cat "${{ env.SKILL_PATH }}")
+          # Extract TARGET_URL from skill file
+          SKILL_URL=$(grep -oP '^TARGET_URL:\s*\K\S+' "${{ env.SKILL_PATH }}" || echo "")
 
-          # ── Extract TARGET_URL from skill ──
-          SKILL_URL=$(echo "$SKILL_CONTENT" | grep -oP '^TARGET_URL:\s*\K\S+' || echo "")
-
-          # ── Resolve URL: dispatch input → skill file ──
+          # Priority: dispatch input → skill file
           if [ -n "${{ inputs.target_url }}" ]; then
             TARGET_URL="${{ inputs.target_url }}"
           elif [ -n "$SKILL_URL" ]; then
             TARGET_URL="$SKILL_URL"
           else
-            echo "::error::No target URL found. Set it in ${{ env.SKILL_PATH }} or pass as dispatch input."
+            echo "::error::No target URL found. Set TARGET_URL in ${{ env.SKILL_PATH }} or pass as dispatch input."
             exit 1
           fi
           echo "target_url=$TARGET_URL" >> "$GITHUB_OUTPUT"
 
-          # ── Resolve max turns ──
-          if [ -n "${{ inputs.max_turns }}" ] && [ "${{ inputs.max_turns }}" != "200" ]; then
+          # Max turns
+          if [ -n "${{ inputs.max_turns }}" ] && [ "${{ inputs.max_turns }}" != "15" ]; then
             echo "max_turns=${{ inputs.max_turns }}" >> "$GITHUB_OUTPUT"
           else
             echo "max_turns=${{ env.DEFAULT_MAX_TURNS }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── 7. Build the prompt ─────────────────────────────────────────────
       - name: Build prompt
-        id: prompt
         run: |
           if [ -n "${{ inputs.prompt }}" ]; then
-            # Use the manual override prompt
-            cat << 'EOF' > /tmp/agent_qa_url_prompt.txt
-          ${{ inputs.prompt }}
-          EOF
+            # Manual override prompt
+            printf '%s\n' '${{ inputs.prompt }}' > /tmp/qa_prompt.txt
           else
-            # Build prompt from the skill file
-            cat << EOF > /tmp/agent_qa_url_prompt.txt
-          Read the QA skill file at ${{ env.SKILL_PATH }} in this repository.
-          Follow every instruction in that file to perform a website audit.
+            # Read the full skill file and append execution context
+            cat "${{ env.SKILL_PATH }}" > /tmp/qa_prompt.txt
+            cat >> /tmp/qa_prompt.txt << PROMPTEOF
 
-          The target URL to audit is: ${{ steps.config.outputs.target_url }}
+          ---
 
-          Use the Puppeteer browser tools to navigate the site. When you have
-          finished the audit, use the gh CLI to create a GitHub issue in this
-          repository with the label "agent-qa-url". Include today's date and 
-          current time in the issue title.
-          EOF
+          RUNTIME CONTEXT:
+          - Target URL: ${{ steps.config.outputs.target_url }}
+          - Repository: ${{ github.repository }}
+          - Trigger: ${{ github.event_name }}
+          - Date: $(date -u +"%Y-%m-%d")
+
+          Use the Puppeteer browser tools (mcp__puppeteer__*) to navigate the site.
+          When finished, use the gh CLI to create a GitHub issue in the repository
+          "${{ github.repository }}" with the label "qa-audit".
+          Include today's date in the issue title, e.g. "Website QA Audit — $(date -u +"%Y-%m-%d")".
+          PROMPTEOF
           fi
 
-      # ── 7. Run Claude Code ──────────────────────────────────────────────
+      # ── 8. Run Claude Code CLI in headless mode ─────────────────────────
       - name: Run Claude Code QA agent
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            $(cat /tmp/agent_qa_url_prompt.txt)
-          claude_args: >-
-            --max-turns ${{ steps.config.outputs.max_turns }}
-            --allowedTools "Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),mcp__puppeteer__*"
+        run: |
+          claude -p "$(cat /tmp/qa_prompt.txt)" \
+            --max-turns "${{ steps.config.outputs.max_turns }}" \
+            --allowedTools "Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(date:*),mcp__puppeteer__*" \
+            --verbose
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUPPETEER_LAUNCH_OPTIONS: '{"headless": true, "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]}'
