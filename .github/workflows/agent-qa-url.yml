@@ -122,7 +122,7 @@ jobs:
           echo "target_url=$TARGET_URL" >> "$GITHUB_OUTPUT"
 
           # Max turns
-          if [ -n "${{ inputs.max_turns }}" ] && [ "${{ inputs.max_turns }}" != "15" ]; then
+          if [ -n "${{ inputs.max_turns }}" ] && [ "${{ inputs.max_turns }}" != "200" ]; then
             echo "max_turns=${{ inputs.max_turns }}" >> "$GITHUB_OUTPUT"
           else
             echo "max_turns=${{ env.DEFAULT_MAX_TURNS }}" >> "$GITHUB_OUTPUT"
@@ -149,7 +149,7 @@ jobs:
 
           Use the Puppeteer browser tools (mcp__puppeteer__*) to navigate the site.
           When finished, use the gh CLI to create a GitHub issue in the repository
-          "${{ github.repository }}" with the label "qa-audit".
+          "${{ github.repository }}" with the label "agent-qa-url".
           Include today's date in the issue title, e.g. "Website QA Audit — $(date -u +"%Y-%m-%d")".
           PROMPTEOF
           fi
@@ -158,15 +158,91 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
-      # ── 9. Run Claude Code CLI in headless mode ─────────────────────────
-      - name: Run Claude Code QA agent
+      # ── 9. Debug — verify environment ──────────────────────────────────
+      - name: Debug environment
         run: |
+          echo "::group::System info"
+          echo "Node: $(node --version)"
+          echo "NPM: $(npm --version)"
+          echo "Claude CLI: $(claude --version 2>&1 || echo 'NOT FOUND')"
+          echo "::endgroup::"
+
+          echo "::group::Auth check"
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY is set (${#ANTHROPIC_API_KEY} chars, starts with ${ANTHROPIC_API_KEY:0:7}...)"
+          else
+            echo "::warning::ANTHROPIC_API_KEY is NOT set"
+          fi
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN is set (${#CLAUDE_CODE_OAUTH_TOKEN} chars, starts with ${CLAUDE_CODE_OAUTH_TOKEN:0:7}...)"
+          else
+            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is NOT set"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::MCP settings"
+          cat ~/.claude/settings.json
+          echo "::endgroup::"
+
+          echo "::group::Resolved config"
+          echo "Target URL: ${{ steps.config.outputs.target_url }}"
+          echo "Max turns:  ${{ steps.config.outputs.max_turns }}"
+          echo "Trigger:    ${{ github.event_name }}"
+          echo "::endgroup::"
+
+          echo "::group::Prompt (first 50 lines)"
+          head -50 /tmp/qa_prompt.txt
+          echo "::endgroup::"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      # ── 10. Run Claude Code CLI in headless mode ────────────────────────
+      - name: Run Claude Code QA agent
+        id: claude_run
+        run: |
+          set -o pipefail
+          echo "::group::Claude Code output"
           claude -p "$(cat /tmp/qa_prompt.txt)" \
             --max-turns "${{ steps.config.outputs.max_turns }}" \
             --allowedTools "Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(date:*),mcp__puppeteer__*" \
-            --verbose
+            --verbose \
+            2>&1 | tee /tmp/claude_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUPPETEER_LAUNCH_OPTIONS: '{"headless": true, "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]}'
+
+      # ── 11. Upload Claude output as artifact on failure ─────────────────
+      - name: Upload Claude output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-output
+          path: /tmp/claude_output.txt
+          retention-days: 7
+
+      # ── 12. Summary ────────────────────────────────────────────────────
+      - name: Post job summary
+        if: always()
+        run: |
+          echo "## Agent QA URL Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Target URL:** ${{ steps.config.outputs.target_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Trigger:** \`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Max turns:** ${{ steps.config.outputs.max_turns }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Claude exit code:** ${{ steps.claude_run.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/claude_output.txt ]; then
+            echo "<details><summary>Claude output (last 100 lines)</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -100 /tmp/claude_output.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
