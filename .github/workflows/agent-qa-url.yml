@@ -7,7 +7,7 @@
 # SETUP:
 #   1. Copy this file to:        .github/workflows/agent-qa-url.yml
 #   2. Customise the skill at:   .agent/skills/qa-url/SKILL.md
-#   3. Add a repository secret:  ANTHROPIC_API_KEY
+#   3. Add a repository secret:  ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
 #   4. Install the Claude App:   https://github.com/apps/claude
 #
 # TRIGGERS:
@@ -167,5 +167,6 @@ jobs:
             --verbose
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUPPETEER_LAUNCH_OPTIONS: '{"headless": true, "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]}'
